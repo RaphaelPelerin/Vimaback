@@ -152,6 +152,8 @@ class UserInDB(BaseModel):
     email: EmailStr
     hashed_password: str
     role: str = "user"  # Default role is "user"
+    api_key: Optional[str] = None  # Add API key field
+    openai_api_key: Optional[str] = None  # Add OpenAI API key field
     
     class Config:
         orm_mode = True
@@ -1751,9 +1753,10 @@ if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True)
 
-def generate_article_content(prompt_type: str, theme: str, additional_content: Optional[str] = None):
+def generate_article_content(prompt_type: str, theme: str, additional_content: Optional[str] = None, user: UserInDB = Depends(get_current_user)):
     # Set OpenAI API key
-    openai.api_key = os.getenv("OPENAI_API_KEY")
+    openai_api_key = user.openai_api_key or os.getenv("OPENAI_API_KEY")
+    openai.api_key = openai_api_key
     
     # Get base prompt based on type
     base_prompts = {
@@ -3109,3 +3112,95 @@ async def process_bulk_articles(bulk_id: str, themes: List[str], email_to: str, 
                 }
             }
         )
+
+def generate_api_key():
+    """Generate a secure API key"""
+    return base64.b32encode(os.urandom(30)).decode('utf-8')
+
+@app.post("/users/generate-api-key", status_code=status.HTTP_200_OK)
+async def generate_user_api_key(current_user: UserInDB = Depends(get_current_user)):
+    """
+    Generate a new API key for the current user
+    """
+    db = get_db()
+    
+    # Generate new API key
+    new_api_key = generate_api_key()
+    
+    # Update the user's API key in the database
+    result = db.users.update_one(
+        {"email": current_user.email},
+        {"$set": {"api_key": new_api_key}}
+    )
+    
+    if result.modified_count == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to generate API key"
+        )
+    
+    return {"api_key": new_api_key}
+
+@app.delete("/users/revoke-api-key", status_code=status.HTTP_200_OK)
+async def revoke_user_api_key(current_user: UserInDB = Depends(get_current_user)):
+    """
+    Revoke the current user's API key
+    """
+    db = get_db()
+    
+    # Remove the user's API key from the database
+    result = db.users.update_one(
+        {"email": current_user.email},
+        {"$unset": {"api_key": ""}}
+    )
+    
+    if result.modified_count == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to revoke API key"
+        )
+    
+    return {"message": "API key revoked successfully"}
+
+@app.get("/users/api-key", status_code=status.HTTP_200_OK)
+async def get_user_api_key(current_user: UserInDB = Depends(get_current_user)):
+    """
+    Get the current user's API key
+    """
+    db = get_db()
+    user = db.users.find_one({"email": current_user.email})
+    
+    if not user or "api_key" not in user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No API key found"
+        )
+    
+    return {"api_key": user["api_key"]}
+
+# Endpoint to set user's OpenAI API key
+@app.post("/users/set-openai-api-key", status_code=status.HTTP_200_OK)
+async def set_user_openai_api_key(api_key: str, current_user: UserInDB = Depends(get_current_user)):
+    db = get_db()
+    result = db.users.update_one(
+        {"email": current_user.email},
+        {"$set": {"openai_api_key": api_key}}
+    )
+    if result.modified_count == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to set OpenAI API key"
+        )
+    return {"message": "OpenAI API key set successfully"}
+
+# Endpoint to get user's OpenAI API key
+@app.get("/users/openai-api-key", status_code=status.HTTP_200_OK)
+async def get_user_openai_api_key(current_user: UserInDB = Depends(get_current_user)):
+    db = get_db()
+    user = db.users.find_one({"email": current_user.email})
+    if not user or "openai_api_key" not in user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No OpenAI API key found"
+        )
+    return {"openai_api_key": user["openai_api_key"]}
