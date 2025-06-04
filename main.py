@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status, File, UploadFile, Form, Response
+from fastapi import FastAPI, HTTPException, Depends, status, File, UploadFile, Form, Response, Body
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -489,12 +489,18 @@ async def create_article(article: ArticleGenerate, current_user: UserInDB = Depe
         image_path = None
         image_error = None
         image_style = None
+
+
+        user_record = db.users.find_one({"email": current_user.email})
+        openai_api_key = user_record.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
+        print(f"OpenAI API key: {openai_api_key}")
+        
         if image_suggestion:
             print(f"\n=== Génération d'image pour l'article {article_uid} ===")
             print(f"Suggestion d'image: {image_suggestion[:100]}...")
             
             # Attendre la génération de l'image
-            image_path, image_error, image_style = await generate_image_from_prompt(image_suggestion)
+            image_path, image_error, image_style = await generate_image_from_prompt(image_suggestion, openai_api_key)
             
             if image_path:
                 print(f"✅ Image générée avec succès: {image_path}")
@@ -1754,10 +1760,10 @@ if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True)
 
 def generate_article_content(prompt_type: str, theme: str, additional_content: Optional[str] = None, user: UserInDB = Depends(get_current_user)):
-    # Set OpenAI API key
+    # Use the user's OpenAI API key if available, otherwise fall back to the default
     openai_api_key = user.openai_api_key or os.getenv("OPENAI_API_KEY")
     openai.api_key = openai_api_key
-    
+    print(f"OPENAI_API_KEY: {openai_api_key}")
     # Get base prompt based on type
     base_prompts = {
         "cybersecurity": """Écris un article détaillé en français pour LinkedIn sous une forme rédactionnelle de type journalistique.
@@ -1855,13 +1861,13 @@ def save_as_word_doc(title: str, content: str, output_path: str):
     doc.save(output_path)
     return output_path
 
-async def generate_image_from_prompt(prompt: str):
+async def generate_image_from_prompt(prompt: str, openai_api_key: str):
     """
     Generate an image using OpenAI's DALL-E based on the provided prompt.
     Returns a tuple of (image_path, error_message)
     """
     try:
-        openai.api_key = os.getenv("OPENAI_API_KEY")
+        openai.api_key = openai_api_key
         
         # Log the image generation attempt
         print(f"\n=== Generating image with DALL-E ===")
@@ -2258,9 +2264,6 @@ async def create_bulk_articles(bulk_request: BulkArticleGenerate, current_user: 
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
 async def process_bulk_articles_with_custom_prompts(bulk_id: str, themes_data: List[ThemeData], email_to: str, default_prompt_type: str, user: UserInDB):
-    """
-    Background task to process multiple article generation with custom prompts.
-    """
     try:
         total = len(themes_data)
         processed = 0
@@ -2270,18 +2273,27 @@ async def process_bulk_articles_with_custom_prompts(bulk_id: str, themes_data: L
         # Extract username correctly from UserInDB object
         username = user.username if hasattr(user, 'username') else user['username']
         
+        # Retrieve the user's OpenAI API key
+        user_record = db.users.find_one({"email": user.email})
+        openai_api_key = user_record.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
+        print(f"OpenAI API key: {openai_api_key}")
+        
         for theme_data in themes_data:
             try:
                 subject = theme_data.subject
                 theme_name = theme_data.theme_name
                 custom_prompt = theme_data.custom_prompt
                 
+                # Set OpenAI API key
+                openai.api_key = openai_api_key
+                
                 # Generate article content - use custom prompt if available
                 if custom_prompt:
                     # Call with custom prompt instead of predefined prompt type
                     generated_content = generate_article_content_with_custom_prompt(
                         theme=subject,
-                        custom_prompt=custom_prompt
+                        custom_prompt=custom_prompt,
+                        openai_api_key=openai_api_key
                     )
                 else:
                     # Fallback to default prompt type
@@ -2374,7 +2386,7 @@ async def process_bulk_articles_with_custom_prompts(bulk_id: str, themes_data: L
                 if structured_content["image_suggestion"] and structured_content["image_suggestion"] != "Aucune suggestion d'image fournie":
                     try:
                         # Generate image
-                        image_path, error, image_style = await generate_image_from_prompt(structured_content["image_suggestion"])
+                        image_path, error, image_style = await generate_image_from_prompt(structured_content["image_suggestion"], openai_api_key)
                         
                         # Update article with image information
                         if image_path:
@@ -2503,11 +2515,11 @@ async def process_bulk_articles_with_custom_prompts(bulk_id: str, themes_data: L
         )
 
 # Function to generate article content with a custom prompt
-def generate_article_content_with_custom_prompt(theme: str, custom_prompt: str):
+def generate_article_content_with_custom_prompt(theme: str, custom_prompt: str, openai_api_key: str):
     # Set OpenAI API key
-    openai.api_key = os.getenv("OPENAI_API_KEY")
+    openai.api_key = openai_api_key
     
-    # Ensure the custom prompt includes the required output structure
+    # Ensure the custom prompt includes the required output struct
     structure_appendix = """
 Structure de la réponse (IMPORTANT, respectez ce format exactement):
 ===Titre===
@@ -2979,11 +2991,18 @@ async def process_bulk_articles(bulk_id: str, themes: List[str], email_to: str, 
                 article["id"] = str(result.inserted_id)
                 articles.append(article)
                 
+                # Set OpenAI API key
+                user_record = db.users.find_one({"email": user.email})
+                openai_api_key = user_record.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
+                print(f"OpenAI API key: {openai_api_key}")
+
+                openai.api_key = openai_api_key
+                
                 # Try to generate an image if an image suggestion is provided
                 if structured_content["image_suggestion"] and structured_content["image_suggestion"] != "Aucune suggestion d'image fournie":
                     try:
                         # Generate image
-                        image_path, error, image_style = await generate_image_from_prompt(structured_content["image_suggestion"])
+                        image_path, error, image_style = await generate_image_from_prompt(structured_content["image_suggestion"], openai_api_key)
                         
                         # Update article with image information
                         if image_path:
@@ -3164,23 +3183,25 @@ async def revoke_user_api_key(current_user: UserInDB = Depends(get_current_user)
 
 @app.get("/users/api-key", status_code=status.HTTP_200_OK)
 async def get_user_api_key(current_user: UserInDB = Depends(get_current_user)):
-    """
-    Get the current user's API key
-    """
     db = get_db()
     user = db.users.find_one({"email": current_user.email})
-    
     if not user or "api_key" not in user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No API key found"
-        )
-    
+        return {"api_key": None}
     return {"api_key": user["api_key"]}
 
 # Endpoint to set user's OpenAI API key
 @app.post("/users/set-openai-api-key", status_code=status.HTTP_200_OK)
-async def set_user_openai_api_key(api_key: str, current_user: UserInDB = Depends(get_current_user)):
+async def set_user_openai_api_key(
+    payload: dict = Body(...), 
+    current_user: UserInDB = Depends(get_current_user)
+):
+    api_key = payload.get("api_key")
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="API key is required"
+        )
+    
     db = get_db()
     result = db.users.update_one(
         {"email": current_user.email},
